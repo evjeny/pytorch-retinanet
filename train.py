@@ -31,6 +31,10 @@ def main(args=None):
 
     parser.add_argument('--depth', help='Resnet depth, must be one of 18, 34, 50, 101, 152', type=int, default=50)
     parser.add_argument('--epochs', help='Number of epochs', type=int, default=100)
+    parser.add_argument('--lr', help='Learning rate', type=float, default=1e-5)
+    parser.add_argument('--val_every', help='Validate every N epochs', type=int, default=1)
+    
+    parser.add_argument('--continue_from', help='Epoch number', type=int, default=None)
 
     parser = parser.parse_args(args)
 
@@ -87,6 +91,13 @@ def main(args=None):
     else:
         raise ValueError('Unsupported model depth, must be one of 18, 34, 50, 101, 152')
 
+    start_from = 0
+    if parser.continue_from:
+        weights_path = '{}_retinanet_{}.pt'.format(parser.dataset, parser.continue_from)
+        retinanet = torch.load(weights_path)
+        
+        start_from = parser.continue_from + 1
+
     use_gpu = True
 
     if use_gpu:
@@ -100,18 +111,19 @@ def main(args=None):
 
     retinanet.training = True
 
-    optimizer = optim.Adam(retinanet.parameters(), lr=1e-5)
+    optimizer = optim.Adam(retinanet.parameters(), lr=parser.lr)
 
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
 
     loss_hist = collections.deque(maxlen=500)
+    least_regression_loss = None
 
     retinanet.train()
     retinanet.module.freeze_bn()
 
     print('Num training images: {}'.format(len(dataset_train)))
 
-    for epoch_num in range(parser.epochs):
+    for epoch_num in range(start_from, parser.epochs):
 
         retinanet.train()
         retinanet.module.freeze_bn()
@@ -149,23 +161,29 @@ def main(args=None):
                     'Epoch: {} | Iteration: {} | Classification loss: {:1.5f} | Regression loss: {:1.5f} | Running loss: {:1.5f}'.format(
                         epoch_num, iter_num, float(classification_loss), float(regression_loss), np.mean(loss_hist)))
 
+                if least_regression_loss is None or regression_loss < least_regression_loss:
+                    least_regression_loss = regression_loss
+                    torch.save(retinanet.module, 'retinanet_best.pt')
+                    with open("least_regression_loss.txt", "w+") as f:
+                        f.write(str(least_regression_loss))
+                
                 del classification_loss
                 del regression_loss
             except Exception as e:
                 print(e)
                 continue
+        if (epoch_num + 1) % parser.val_every == 0:
+            if parser.dataset == 'coco':
 
-        if parser.dataset == 'coco':
+                print('Evaluating dataset')
 
-            print('Evaluating dataset')
+                coco_eval.evaluate_coco(dataset_val, retinanet)
 
-            coco_eval.evaluate_coco(dataset_val, retinanet)
+            elif parser.dataset == 'csv' and parser.csv_val is not None:
 
-        elif parser.dataset == 'csv' and parser.csv_val is not None:
+                print('Evaluating dataset')
 
-            print('Evaluating dataset')
-
-            mAP = csv_eval.evaluate(dataset_val, retinanet)
+                mAP = csv_eval.evaluate(dataset_val, retinanet)
 
         scheduler.step(np.mean(epoch_loss))
 
